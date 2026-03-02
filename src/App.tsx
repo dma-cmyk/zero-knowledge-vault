@@ -323,20 +323,27 @@ export default function App() {
           // Layer 3: Line-by-line fallback (if q is still empty)
           if (!q || q.length === 0) {
             console.log("Falling back to line-by-line extraction");
-            const lines = text.split('\n');
+            // Limit text to 50KB to prevent processing infinite loops
+            const safeText = text.substring(0, 50000);
+            const lines = safeText.split('\n');
             const extracted: string[] = [];
             for (const line of lines) {
-              const trimmed = line.trim();
-              // Look for lines that look like questions (start with bullet or number, or just long enough)
-              // Matches: "- Question", "1. Question", "* Question", "Question?"
-              const match = trimmed.match(/^(?:\d+\.|\*|-|•)?\s*(.*[?？]$|.*[わら]$|.*ね$)/);
-              if (match && match[1]) {
-                extracted.push(match[1].replace(/^["']|["']$/g, '').trim());
-              } else if (trimmed.length > 5 && trimmed.includes('?')) {
-                extracted.push(trimmed.replace(/^["']|["']$/g, '').trim());
+              // Remove JSON markers [ ], quotes ", and commas ,
+              let cleaned = line.trim()
+                .replace(/^[[\]\s,"']+/, '') // Remove leading [ ] , " '
+                .replace(/[[\s,"']+$/, '');  // Remove trailing [ ] , " '
+              
+              if (cleaned.length < 5) continue;
+
+              // Heuristic: Must end with a question mark or a common Japanese sentence ender
+              // Or be a reasonably formatted question
+              if (cleaned.match(/[?？]$|[わら]$|ね$|かな$/) || (cleaned.length > 10 && extracted.length < 20)) {
+                extracted.push(cleaned);
               }
+              
+              if (extracted.length >= 20) break;
             }
-            q = extracted.slice(0, 20); // Limit to 20
+            q = extracted;
           }
         } catch (parserErr) {
           console.error("Super robust parser failed", parserErr);
