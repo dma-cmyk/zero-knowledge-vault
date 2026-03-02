@@ -262,52 +262,77 @@ export default function App() {
     setGenerationProgress(0);
     setError(null);
 
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
     try {
       const customAi = new GoogleGenAI({ apiKey: userApiKey || defaultApiKey });
       const currentQuestions: string[] = [];
+      const batchSize = 5;
+      const totalQuestions = 20;
 
-      for (let i = 0; i < 20; i++) {
-        setGenerationProgress(i + 1);
+      for (let i = 0; i < totalQuestions; i += batchSize) {
+        // Wait between batches to stay within rate limits (free tier is approx 5-15 RPM)
+        if (i > 0) await sleep(2000);
+        
+        const countToGenerate = Math.min(batchSize, totalQuestions - i);
         
         const prompt = `あなたは秘密の合言葉を生成するセキュリティ専門家です。
 テーマ: "${themeLabel}"
 思い浮かべているもの: "${targetName}"
 既に生成された質問: ${JSON.stringify(currentQuestions)}
 
-上記のテーマに関連し、本人しか答えられないような具体的でユニークな質問を「1つだけ」生成してください。
+上記のテーマに関連し、本人しか答えられないような具体的でユニークな質問を「${countToGenerate}つ」だけ、必ずJSON配列形式で生成してください。
+形式: ["質問1", "質問2", ...]
 条件:
-- 質問文のみを出力すること。余計な解説、装飾（Markdownのバックチ等）、プレフィックス（「質問1:」等）は一切不要。
 - 過去の質問と重複しないこと。
 - 短く簡潔に。
-- アキネーターのように対象を絞り込むための質問であること。`;
+- アキネーターのように対象を詳しく特定するための具体的な質問であること。
+- 余計な解説や引用符などは一切不要。必ず有効なJSON配列のみを出力すること。`;
 
         const response = await customAi.models.generateContent({
           model: selectedModel,
           contents: prompt
         });
         
-        const text = (response.text || '').trim()
-          .replace(/^[[\]\s,"']+/, '') // Remove leading [ ] , " '
-          .replace(/[[\s,"']+$/, '')  // Remove trailing [ ] , " '
-          .replace(/^[1-9\d]*[.:-]\s*/, ''); // Remove leading numbers
-        
-        if (text) {
-          currentQuestions.push(text);
-          // Update questions state periodically to show items as they appear
-          if (currentQuestions.length % 5 === 0 || currentQuestions.length === 20) {
-            setQuestions([...currentQuestions]);
+        const text = (response.text || '').trim();
+        console.log(`Batch ${i/batchSize + 1} response:`, text);
+
+        let batchQuestions: string[] = [];
+        try {
+          const start = text.indexOf('[');
+          const end = text.lastIndexOf(']');
+          if (start !== -1 && end !== -1) {
+            batchQuestions = JSON.parse(text.substring(start, end + 1));
           }
+        } catch (parseErr) {
+          console.warn("Batch JSON parse failed, falling back to line-by-line", parseErr);
+          batchQuestions = text.split('\n')
+            .map(line => line.trim().replace(/^[[\]\s,"']+/, '').replace(/[[\s,"']+$/, '').replace(/^[1-9\d]*[.:-]\s*/, ''))
+            .filter(line => line.length > 5 && !line.includes('[') && !line.includes(']'))
+            .slice(0, countToGenerate);
+        }
+        
+        if (batchQuestions.length > 0) {
+          currentQuestions.push(...batchQuestions);
+          setQuestions([...currentQuestions]);
+          setGenerationProgress(currentQuestions.length);
         } else {
           throw new Error("AIから有効な回答が得られませんでした。");
         }
+        
+        if (currentQuestions.length >= totalQuestions) break;
       }
       
-      setQuestions(currentQuestions);
+      setQuestions(currentQuestions.slice(0, totalQuestions));
       setCurrentQuestionIndex(0);
       setAnswers([]);
     } catch (err: any) {
-      console.error("Iterative generation failed:", err);
-      setError("質問の生成中にエラーが発生しました。");
+      console.error("Batch generation failed:", err);
+      if (err.message?.includes('429')) {
+        setError("API制限（429エラー）が発生しました。1分ほど待ってから再試行してください。");
+      } else {
+        setError("質問の生成中にエラーが発生しました。");
+      }
     } finally {
       setLoading(false);
       setGenerationProgress(0);
