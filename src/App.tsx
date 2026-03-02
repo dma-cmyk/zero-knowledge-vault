@@ -294,14 +294,53 @@ export default function App() {
         
         const text = response.text || '';
         console.log("Raw fallback text:", text);
-        // More robust JSON extraction
-        const start = text.indexOf('[');
-        const end = text.lastIndexOf(']');
-        if (start !== -1 && end !== -1 && end > start) {
-          const jsonStr = text.substring(start, end + 1);
-          q = JSON.parse(jsonStr);
-        } else {
-          throw new Error("JSON format not found in text");
+        
+        // Multi-layered Robust Parsing
+        try {
+          // Layer 1: Clean and extract JSON array using regex/brackets
+          let jsonStr = '';
+          const start = text.indexOf('[');
+          const end = text.lastIndexOf(']');
+          
+          if (start !== -1 && end !== -1 && end > start) {
+            jsonStr = text.substring(start, end + 1);
+            
+            // Layer 2: Normalize common JSON-like errors (heuristic)
+            const normalized = jsonStr
+              .replace(/'/g, '"') // Single to double quotes
+              .replace(/,\s*]/g, ']') // Trailing commas
+              .replace(/[\u0000-\u001F\u007F-\u009F]/g, "") // Control characters
+              .trim();
+            
+            try {
+              q = JSON.parse(normalized);
+            } catch (innerErr) {
+              console.warn("JSON.parse failed even after normalization", innerErr);
+              // If normalization failed, we'll fall through to Layer 3
+            }
+          }
+
+          // Layer 3: Line-by-line fallback (if q is still empty)
+          if (!q || q.length === 0) {
+            console.log("Falling back to line-by-line extraction");
+            const lines = text.split('\n');
+            const extracted: string[] = [];
+            for (const line of lines) {
+              const trimmed = line.trim();
+              // Look for lines that look like questions (start with bullet or number, or just long enough)
+              // Matches: "- Question", "1. Question", "* Question", "Question?"
+              const match = trimmed.match(/^(?:\d+\.|\*|-|•)?\s*(.*[?？]$|.*[わら]$|.*ね$)/);
+              if (match && match[1]) {
+                extracted.push(match[1].replace(/^["']|["']$/g, '').trim());
+              } else if (trimmed.length > 5 && trimmed.includes('?')) {
+                extracted.push(trimmed.replace(/^["']|["']$/g, '').trim());
+              }
+            }
+            q = extracted.slice(0, 20); // Limit to 20
+          }
+        } catch (parserErr) {
+          console.error("Super robust parser failed", parserErr);
+          throw new Error("AIの回答を読み取れませんでした。");
         }
       }
 
