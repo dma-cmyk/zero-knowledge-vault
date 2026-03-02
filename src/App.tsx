@@ -177,25 +177,57 @@ export default function App() {
     setError(null);
     try {
       const customAi = new GoogleGenAI({ apiKey: userApiKey || defaultApiKey });
-      const response = await customAi.models.generateContent({
-        model: selectedModel,
-        contents: `あなたは『ランプのお姉さん』です。ミステリアスでエレガントな口調（語尾は「〜かしら？」「〜だわ」など）で、テーマ「${themeLabel}」に関連する質問を20個作成してください。
-        ユーザーが特定の何かを思い浮かべていると想定し、アキネーターのようにそれを当てるための質問をしてください。
-        回答は「はい」「いいえ」「わからない」「たぶんそう」「たぶん違う」のいずれかになります。
-        質問のみをJSON配列で返してください。`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING }
+      let q: string[] = [];
+      
+      try {
+        // First attempt: Try with JSON mode (supported by Gemini 1.5+)
+        const response = await customAi.models.generateContent({
+          model: selectedModel,
+          contents: `あなたは『ランプのお姉さん』です。ミステリアスでエレガントな口調（語尾は「〜かしら？」「〜だわ」など）で、テーマ「${themeLabel}」に関連する質問を20個作成してください。
+          ユーザーが特定の何かを思い浮かべていると想定し、アキネーターのようにそれを当てるための質問をしてください。
+          回答は「はい」「いいえ」「わからない」「たぶんそう」「たぶん違う」のいずれかになります。
+          質問のみをJSON配列で返してください。`,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            }
           }
+        });
+        q = JSON.parse(response.text || '[]');
+      } catch (jsonErr) {
+        console.warn("JSON mode failed, falling back to text mode", jsonErr);
+        // Second attempt: Fallback to plain text for models like Gemma that don't support responseMimeType
+        const response = await customAi.models.generateContent({
+          model: selectedModel,
+          contents: `あなたは『ランプのお姉さん』です。ミステリアスでエレガントな口調（語尾は「〜かしら？」「〜だわ」など）で、テーマ「${themeLabel}」に関連する質問を20個作成してください。
+          ユーザーが特定の何かを思い浮かべていると想定し、アキネーターのようにそれを当てるための質問をしてください。
+          回答は「はい」「いいえ」「わからない」「たぶんそう」「たぶん違う」のいずれかになります。
+          結果は必ず次のフォーマット（JSON配列）で返してください。余計な説明や装飾は一切不要です。
+          ["質問1", "質問2", ..., "質問20"]`,
+        });
+        
+        const text = response.text || '';
+        // Extract JSON array from text using regex
+        const jsonMatch = text.match(/\[\s*".*"\s*\]/s);
+        if (jsonMatch) {
+          q = JSON.parse(jsonMatch[0]);
+        } else {
+          // Final fallback: try parsing the whole text if it looks like JSON
+          q = JSON.parse(text.substring(text.indexOf('['), text.lastIndexOf(']') + 1));
         }
-      });
-      const q = JSON.parse(response.text || '[]');
-      setQuestions(q);
-      setCurrentQuestionIndex(0);
-      setAnswers([]);
+      }
+
+      if (q && q.length > 0) {
+        setQuestions(q);
+        setCurrentQuestionIndex(0);
+        setAnswers([]);
+      } else {
+        throw new Error("質問が生成されませんでした。");
+      }
     } catch (err) {
+      console.error("Generation error:", err);
       setError("質問の生成に失敗しました。APIキーやモデルの設定を確認してください。");
     } finally {
       setLoading(false);
@@ -600,18 +632,18 @@ export default function App() {
 
                       <div className="space-y-3">
                         <label className={`text-sm font-black uppercase tracking-widest ${isDarkMode ? 'text-[#f5c2e7]' : 'text-black'}`}>カスタムテーマ（自由入力）</label>
-                        <div className="flex gap-2">
+                        <div className="flex flex-col sm:flex-row gap-3 sm:gap-2">
                           <input 
                             type="text" 
                             placeholder="例: 宇宙, 魔法, 昭和レトロ"
                             value={customTheme}
                             onChange={(e) => setCustomTheme(e.target.value)}
-                            className={`flex-1 px-6 py-4 border-4 border-black rounded-2xl outline-none transition-all font-bold ${isDarkMode ? 'bg-[#313244] text-white focus:bg-[#45475a]' : 'bg-[#F1F2F6] text-black focus:bg-white'}`}
+                            className={`w-full px-6 py-4 border-4 border-black rounded-2xl outline-none transition-all font-bold ${isDarkMode ? 'bg-[#313244] text-white focus:bg-[#45475a]' : 'bg-[#F1F2F6] text-black focus:bg-white'}`}
                           />
                           <button
                             onClick={() => generateQuestions(customTheme, '✨')}
                             disabled={!title || !password || !customTheme || loading}
-                            className={`px-6 py-4 border-4 border-black rounded-2xl font-black transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] active:translate-y-[2px] active:shadow-none disabled:opacity-50 ${isDarkMode ? 'bg-[#fab387] text-black' : 'bg-[#FFD93D] text-black'}`}
+                            className={`w-full sm:w-auto px-8 py-4 border-4 border-black rounded-2xl font-black transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] active:translate-y-[2px] active:shadow-none disabled:opacity-50 ${isDarkMode ? 'bg-[#fab387] text-black' : 'bg-[#FFD93D] text-black'}`}
                           >
                             開始
                           </button>
@@ -620,16 +652,16 @@ export default function App() {
                       
                       <div className="space-y-4">
                         <label className={`text-sm font-black uppercase tracking-widest ${isDarkMode ? 'text-[#f5c2e7]' : 'text-black'}`}>またはプリセットから選択</label>
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 xs:grid-cols-2 gap-3">
                           {THEMES.map((t) => (
                             <button
                               key={t.id}
                               onClick={() => generateQuestions(t.label, t.icon)}
                               disabled={!title || !password || loading}
-                              className={`p-4 border-4 border-black rounded-2xl text-left transition-all flex flex-col gap-2 group disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] active:translate-y-[2px] active:shadow-none ${isDarkMode ? 'bg-[#313244] hover:bg-[#45475a]' : 'bg-white hover:bg-[#DFF9FB]'}`}
+                              className={`p-3 sm:p-4 border-4 border-black rounded-2xl text-left transition-all flex flex-col gap-2 group disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] active:translate-y-[2px] active:shadow-none ${isDarkMode ? 'bg-[#313244] hover:bg-[#45475a]' : 'bg-white hover:bg-[#DFF9FB]'}`}
                             >
-                              <span className="text-3xl">{t.icon}</span>
-                              <p className="font-black text-sm">{t.label}</p>
+                              <span className="text-2xl sm:text-3xl">{t.icon}</span>
+                              <p className="font-black text-xs sm:text-sm">{t.label}</p>
                             </button>
                           ))}
                         </div>
