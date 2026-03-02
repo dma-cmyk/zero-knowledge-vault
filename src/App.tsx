@@ -75,6 +75,67 @@ export default function App() {
   const [customTheme, setCustomTheme] = useState('');
   const [themeIcon, setThemeIcon] = useState('🔒');
   
+  // Standalone mode detection (for GitHub Pages)
+  const [isStandalone, setIsStandalone] = useState(false);
+  
+  // Crypto helpers (Web Crypto API)
+  const cryptoHelpers = {
+    async deriveKey(answers: string[], salt: string) {
+      const password = answers.join("|");
+      const enc = new TextEncoder();
+      const baseKey = await crypto.subtle.importKey(
+        'raw', 
+        enc.encode(password), 
+        'PBKDF2', 
+        false, 
+        ['deriveKey']
+      );
+      return crypto.subtle.deriveKey(
+        {
+          name: 'PBKDF2',
+          salt: enc.encode(salt),
+          iterations: 600000,
+          hash: 'SHA-256'
+        },
+        baseKey,
+        { name: 'AES-CBC', length: 256 },
+        true,
+        ['encrypt', 'decrypt']
+      );
+    },
+    async encrypt(text: string, answers: string[]) {
+      const salt = Math.random().toString(36).substring(2, 12);
+      const iv = crypto.getRandomValues(new Uint8Array(16));
+      const key = await this.deriveKey(answers, salt);
+      const enc = new TextEncoder();
+      const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-CBC', iv },
+        key,
+        enc.encode(text)
+      );
+      return {
+        encryptedData: btoa(String.fromCharCode(...new Uint8Array(encrypted))),
+        iv: btoa(String.fromCharCode(...iv)),
+        salt
+      };
+    },
+    async decrypt(encryptedData: string, iv: string, salt: string, answers: string[]) {
+      try {
+        const key = await this.deriveKey(answers, salt);
+        const encryptedBuffer = new Uint8Array(atob(encryptedData).split('').map(c => c.charCodeAt(0)));
+        const ivBuffer = new Uint8Array(atob(iv).split('').map(c => c.charCodeAt(0)));
+        const decrypted = await crypto.subtle.decrypt(
+          { name: 'AES-CBC', iv: ivBuffer },
+          key,
+          encryptedBuffer
+        );
+        return new TextDecoder().decode(decrypted);
+      } catch (e) {
+        return null;
+      }
+    }
+  };
+  
   // API Settings state
   const [userApiKey, setUserApiKey] = useState(() => localStorage.getItem('zk_vault_api_key') || defaultApiKey);
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('zk_vault_model') || defaultModel);
@@ -102,11 +163,29 @@ export default function App() {
   ];
 
   useEffect(() => {
-    fetchVaults();
+    checkModeAndFetch();
     if (userApiKey) {
       fetchModels(userApiKey);
     }
   }, []);
+
+  const checkModeAndFetch = async () => {
+    try {
+      const res = await fetch('/api/vaults');
+      if (res.ok) {
+        setIsStandalone(false);
+        const data = await res.json();
+        setVaults(data);
+      } else {
+        throw new Error("API not available");
+      }
+    } catch (err) {
+      console.log("Entering standalone mode (LocalStorage)");
+      setIsStandalone(true);
+      const saved = localStorage.getItem('zk_vault_data');
+      if (saved) setVaults(JSON.parse(saved));
+    }
+  };
 
   const fetchModels = async (key: string) => {
     if (!key) {
@@ -161,6 +240,11 @@ export default function App() {
   };
 
   const fetchVaults = async () => {
+    if (isStandalone) {
+      const saved = localStorage.getItem('zk_vault_data');
+      if (saved) setVaults(JSON.parse(saved));
+      return;
+    }
     const res = await fetch('/api/vaults');
     const data = await res.json();
     setVaults(data);
@@ -209,13 +293,15 @@ export default function App() {
         });
         
         const text = response.text || '';
-        // Extract JSON array from text using regex
-        const jsonMatch = text.match(/\[\s*".*"\s*\]/s);
-        if (jsonMatch) {
-          q = JSON.parse(jsonMatch[0]);
+        console.log("Raw fallback text:", text);
+        // More robust JSON extraction
+        const start = text.indexOf('[');
+        const end = text.lastIndexOf(']');
+        if (start !== -1 && end !== -1 && end > start) {
+          const jsonStr = text.substring(start, end + 1);
+          q = JSON.parse(jsonStr);
         } else {
-          // Final fallback: try parsing the whole text if it looks like JSON
-          q = JSON.parse(text.substring(text.indexOf('['), text.lastIndexOf(']') + 1));
+          throw new Error("JSON format not found in text");
         }
       }
 
@@ -311,22 +397,42 @@ export default function App() {
   const saveVault = async (finalAnswers: string[], themeIcon: string) => {
     setLoading(true);
     try {
-      const res = await fetch('/api/vaults', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      if (isStandalone) {
+        const { encryptedData, iv, salt } = await cryptoHelpers.encrypt(password, finalAnswers);
+        const newItem: VaultItem = {
+          id: Date.now(),
           title,
-          password,
+          encrypted_password: encryptedData,
+          iv,
+          salt,
           questions,
-          answers: finalAnswers,
           theme: themeIcon,
-          theme_label: theme
-        })
-      });
-      if (res.ok) {
+          theme_label: theme || '',
+          created_at: new Date().toISOString()
+        };
+        const updated = [newItem, ...vaults];
+        setVaults(updated);
+        localStorage.setItem('zk_vault_data', JSON.stringify(updated));
         setIsAdding(false);
         resetForm();
-        fetchVaults();
+      } else {
+        const res = await fetch('/api/vaults', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title,
+            password,
+            questions,
+            answers: finalAnswers,
+            theme: themeIcon,
+            theme_label: theme
+          })
+        });
+        if (res.ok) {
+          setIsAdding(false);
+          resetForm();
+          fetchVaults();
+        }
       }
     } catch (err) {
       setError("保存に失敗しました。");
@@ -338,16 +444,30 @@ export default function App() {
   const decryptVault = async (finalAnswers: string[]) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/vaults/${isDecrypting?.id}/decrypt`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ answers: finalAnswers })
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setDecryptedPassword(data.password);
+      if (isStandalone && isDecrypting) {
+        const decrypted = await cryptoHelpers.decrypt(
+          isDecrypting.encrypted_password || '',
+          isDecrypting.iv || '',
+          isDecrypting.salt || '',
+          finalAnswers
+        );
+        if (decrypted) {
+          setDecryptedPassword(decrypted);
+        } else {
+          setError("復号に失敗しました。回答または対象の名前が間違っています。");
+        }
       } else {
-        setError(data.error || "復号に失敗しました。回答または対象の名前が間違っています。");
+        const res = await fetch(`/api/vaults/${isDecrypting?.id}/decrypt`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ answers: finalAnswers })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          setDecryptedPassword(data.password);
+        } else {
+          setError(data.error || "復号に失敗しました。回答または対象の名前が間違っています。");
+        }
       }
     } catch (err) {
       setError("通信エラーが発生しました。");
@@ -359,7 +479,13 @@ export default function App() {
   const deleteVault = async (id: number) => {
     setLoading(true);
     try {
-      await fetch(`/api/vaults/${id}`, { method: 'DELETE' });
+      if (isStandalone) {
+        const updated = vaults.filter(v => v.id !== id);
+        setVaults(updated);
+        localStorage.setItem('zk_vault_data', JSON.stringify(updated));
+      } else {
+        await fetch(`/api/vaults/${id}`, { method: 'DELETE' });
+      }
       setIsDeleting(null);
       setDeleteConfirmInput('');
       fetchVaults();
