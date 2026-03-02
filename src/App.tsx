@@ -65,6 +65,7 @@ export default function App() {
   const [theme, setTheme] = useState<string | null>(null);
   const [targetName, setTargetName] = useState('');
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [generationProgress, setGenerationProgress] = useState(0);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState<Answer[]>([]);
   const [decryptedPassword, setDecryptedPassword] = useState<string | null>(null);
@@ -258,111 +259,58 @@ export default function App() {
     setTheme(themeLabel);
     setThemeIcon(icon);
     setLoading(true);
+    setGenerationProgress(0);
     setError(null);
+
     try {
       const customAi = new GoogleGenAI({ apiKey: userApiKey || defaultApiKey });
-      let q: string[] = [];
-      
-      try {
-        // First attempt: Try with JSON mode (supported by Gemini 1.5+)
+      const currentQuestions: string[] = [];
+
+      for (let i = 0; i < 20; i++) {
+        setGenerationProgress(i + 1);
+        
+        const prompt = `あなたは秘密の合言葉を生成するセキュリティ専門家です。
+テーマ: "${themeLabel}"
+思い浮かべているもの: "${targetName}"
+既に生成された質問: ${JSON.stringify(currentQuestions)}
+
+上記のテーマに関連し、本人しか答えられないような具体的でユニークな質問を「1つだけ」生成してください。
+条件:
+- 質問文のみを出力すること。余計な解説、装飾（Markdownのバックチ等）、プレフィックス（「質問1:」等）は一切不要。
+- 過去の質問と重複しないこと。
+- 短く簡潔に。
+- アキネーターのように対象を絞り込むための質問であること。`;
+
         const response = await customAi.models.generateContent({
           model: selectedModel,
-          contents: `あなたは『ランプのお姉さん』です。ミステリアスでエレガントな口調（語尾は「〜かしら？」「〜だわ」など）で、テーマ「${themeLabel}」に関連する質問を20個作成してください。
-          ユーザーが特定の何かを思い浮かべていると想定し、アキネーターのようにそれを当てるための質問をしてください。
-          回答は「はい」「いいえ」「わからない」「たぶんそう」「たぶん違う」のいずれかになります。
-          質問のみをJSON配列で返してください。`,
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING }
-            }
-          }
-        });
-        q = JSON.parse(response.text || '[]');
-      } catch (jsonErr) {
-        console.warn("JSON mode failed, falling back to text mode", jsonErr);
-        // Second attempt: Fallback to plain text for models like Gemma that don't support responseMimeType
-        const response = await customAi.models.generateContent({
-          model: selectedModel,
-          contents: `あなたは『ランプのお姉さん』です。ミステリアスでエレガントな口調（語尾は「〜かしら？」「〜だわ」など）で、テーマ「${themeLabel}」に関連する質問を20個作成してください。
-          ユーザーが特定の何かを思い浮かべていると想定し、アキネーターのようにそれを当てるための質問をしてください。
-          回答は「はい」「いいえ」「わからない」「たぶんそう」「たぶん違う」のいずれかになります。
-          結果は必ず次のフォーマット（JSON配列）で返してください。余計な説明や装飾は一切不要です。
-          ["質問1", "質問2", ..., "質問20"]`,
+          contents: prompt
         });
         
-        const text = response.text || '';
-        console.log("Raw fallback text:", text);
+        const text = (response.text || '').trim()
+          .replace(/^[[\]\s,"']+/, '') // Remove leading [ ] , " '
+          .replace(/[[\s,"']+$/, '')  // Remove trailing [ ] , " '
+          .replace(/^[1-9\d]*[.:-]\s*/, ''); // Remove leading numbers
         
-        // Multi-layered Robust Parsing
-        try {
-          // Layer 1: Clean and extract JSON array using regex/brackets
-          let jsonStr = '';
-          const start = text.indexOf('[');
-          const end = text.lastIndexOf(']');
-          
-          if (start !== -1 && end !== -1 && end > start) {
-            jsonStr = text.substring(start, end + 1);
-            
-            // Layer 2: Normalize common JSON-like errors (heuristic)
-            const normalized = jsonStr
-              .replace(/'/g, '"') // Single to double quotes
-              .replace(/,\s*]/g, ']') // Trailing commas
-              .replace(/[\u0000-\u001F\u007F-\u009F]/g, "") // Control characters
-              .trim();
-            
-            try {
-              q = JSON.parse(normalized);
-            } catch (innerErr) {
-              console.warn("JSON.parse failed even after normalization", innerErr);
-              // If normalization failed, we'll fall through to Layer 3
-            }
+        if (text) {
+          currentQuestions.push(text);
+          // Update questions state periodically to show items as they appear
+          if (currentQuestions.length % 5 === 0 || currentQuestions.length === 20) {
+            setQuestions([...currentQuestions]);
           }
-
-          // Layer 3: Line-by-line fallback (if q is still empty)
-          if (!q || q.length === 0) {
-            console.log("Falling back to line-by-line extraction");
-            // Limit text to 50KB to prevent processing infinite loops
-            const safeText = text.substring(0, 50000);
-            const lines = safeText.split('\n');
-            const extracted: string[] = [];
-            for (const line of lines) {
-              // Remove JSON markers [ ], quotes ", and commas ,
-              let cleaned = line.trim()
-                .replace(/^[[\]\s,"']+/, '') // Remove leading [ ] , " '
-                .replace(/[[\s,"']+$/, '');  // Remove trailing [ ] , " '
-              
-              if (cleaned.length < 5) continue;
-
-              // Heuristic: Must end with a question mark or a common Japanese sentence ender
-              // Or be a reasonably formatted question
-              if (cleaned.match(/[?？]$|[わら]$|ね$|かな$/) || (cleaned.length > 10 && extracted.length < 20)) {
-                extracted.push(cleaned);
-              }
-              
-              if (extracted.length >= 20) break;
-            }
-            q = extracted;
-          }
-        } catch (parserErr) {
-          console.error("Super robust parser failed", parserErr);
-          throw new Error("AIの回答を読み取れませんでした。");
+        } else {
+          throw new Error("AIから有効な回答が得られませんでした。");
         }
       }
-
-      if (q && q.length > 0) {
-        setQuestions(q);
-        setCurrentQuestionIndex(0);
-        setAnswers([]);
-      } else {
-        throw new Error("質問が生成されませんでした。");
-      }
-    } catch (err) {
-      console.error("Generation error:", err);
-      setError("質問の生成に失敗しました。APIキーやモデルの設定を確認してください。");
+      
+      setQuestions(currentQuestions);
+      setCurrentQuestionIndex(0);
+      setAnswers([]);
+    } catch (err: any) {
+      console.error("Iterative generation failed:", err);
+      setError("質問の生成中にエラーが発生しました。");
     } finally {
       setLoading(false);
+      setGenerationProgress(0);
     }
   };
 
@@ -812,13 +760,18 @@ export default function App() {
                             onChange={(e) => setCustomTheme(e.target.value)}
                             className={`w-full px-6 py-4 border-4 border-black rounded-2xl outline-none transition-all font-bold ${isDarkMode ? 'bg-[#313244] text-white focus:bg-[#45475a]' : 'bg-[#F1F2F6] text-black focus:bg-white'}`}
                           />
-                          <button
-                            onClick={() => generateQuestions(customTheme, '✨')}
-                            disabled={!title || !password || !customTheme || loading}
-                            className={`w-full sm:w-auto px-8 py-4 border-4 border-black rounded-2xl font-black transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] active:translate-y-[2px] active:shadow-none disabled:opacity-50 ${isDarkMode ? 'bg-[#fab387] text-black' : 'bg-[#FFD93D] text-black'}`}
-                          >
-                            開始
-                          </button>
+                            <button
+                              onClick={() => generateQuestions(customTheme, '✨')}
+                              disabled={!title || !password || !customTheme || loading}
+                              className={`w-full sm:w-auto px-8 py-4 border-4 border-black rounded-2xl font-black transition-all shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-[-2px] hover:shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] active:translate-y-[2px] active:shadow-none disabled:opacity-50 flex items-center justify-center gap-2 ${isDarkMode ? 'bg-[#fab387] text-black' : 'bg-[#FFD93D] text-black'}`}
+                            >
+                              {loading ? (
+                                <>
+                                  <RefreshCw size={20} className="animate-spin" />
+                                  <span className="text-sm">{generationProgress}/20</span>
+                                </>
+                              ) : "開始"}
+                            </button>
                         </div>
                       </div>
                       
